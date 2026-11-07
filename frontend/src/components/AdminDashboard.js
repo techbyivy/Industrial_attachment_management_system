@@ -39,6 +39,9 @@ const AdminDashboard = ({ user, onLogout }) => {
   const [csFormError, setCsFormError] = useState('');
   const [csFormSuccess, setCsFormSuccess] = useState('');
   const [addCsLoading, setAddCsLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+ const [deleteError, setDeleteError] = useState('');
+ const [deleteMessage, setDeleteMessage] = useState('');
 
   const lecturerDepartments = [
     'Computer Science',
@@ -142,6 +145,36 @@ const AdminDashboard = ({ user, onLogout }) => {
       // Keep UI usable even if assignments can't be loaded.
     }
   };
+  
+  const handleDeleteAccount = async (type, id, name) => {
+  const isLecturer = type === 'lecturer';
+  const label = isLecturer ? 'lecturer' : 'company supervisor';
+  if (!window.confirm(`Delete ${label} "${name}"? Their login account will be removed and this cannot be undone.`)) {
+    return;
+  }
+
+  setDeleteError('');
+  setDeleteMessage('');
+  setDeletingId(`${type}-${id}`);
+  try {
+    const path = isLecturer ? 'lecturers' : 'company-supervisors';
+    const res = await fetch(`${API_BASE}/api/admin/${path}/${id}`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.message || `Failed to delete ${label}`);
+
+    if (isLecturer) {
+      setLecturers((prev) => prev.filter((l) => l.id !== id));
+      await refreshAssignments(); // their student assignments may have changed
+    } else {
+      setCompanySupervisors((prev) => prev.filter((cs) => cs.id !== id));
+    }
+    setDeleteMessage(data.message || `${name} deleted successfully.`);
+  } catch (err) {
+    setDeleteError(err.message || `Unable to delete ${label}`);
+  } finally {
+    setDeletingId(null);
+  }
+};
 
   const handleAssignRegion = async (region) => {
     setAssignError('');
@@ -463,6 +496,8 @@ const AdminDashboard = ({ user, onLogout }) => {
 
       <div style={{ marginTop: '40px' }}>
         <div className="page-header">REGISTERED LECTURERS</div>
+        {deleteError && <div style={{ color: 'red', marginBottom: '12px' }} role="alert">{deleteError}</div>}
+        {deleteMessage && <div style={{ color: '#2e7d32', marginBottom: '12px' }} role="status">{deleteMessage}</div>}
         <table className="data-table">
           <thead>
             <tr>
@@ -472,6 +507,7 @@ const AdminDashboard = ({ user, onLogout }) => {
               <th>Phone Number</th>
               <th>Residence Region</th>
               <th>E-mail</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -483,6 +519,16 @@ const AdminDashboard = ({ user, onLogout }) => {
                 <td>{lecturer.phone}</td>
                 <td>{lecturer.residence_region}</td>
                 <td>{lecturer.email}</td>
+                <td>
+                  <button
+                    className="btn btn-danger"
+                    style={{ padding: '8px 16px', fontSize: '12px' }}
+                    disabled={deletingId === `lecturer-${lecturer.id}`}
+                    onClick={() => handleDeleteAccount('lecturer', lecturer.id, lecturer.name)}
+                  >
+                    {deletingId === `lecturer-${lecturer.id}` ? 'Deleting...' : 'Delete'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -493,31 +539,42 @@ const AdminDashboard = ({ user, onLogout }) => {
         <div className="page-header">COMPANY SUPERVISORS (LOGIN ACCOUNTS)</div>
         <table className="data-table">
           <thead>
-            <tr>
-              <th>Name</th>
-              <th>Company</th>
-              <th>Phone</th>
-              <th>Email (login username)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {companySupervisors.length === 0 ? (
-              <tr>
-                <td colSpan="4" style={{ textAlign: 'center' }}>
-                  No company supervisor accounts yet. Add one below.
-                </td>
-              </tr>
-            ) : (
-              companySupervisors.map((cs) => (
-                <tr key={cs.id}>
-                  <td>{cs.name}</td>
-                  <td>{cs.company_name}</td>
-                  <td>{cs.phone}</td>
-                  <td>{cs.email}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
+  <tr>
+    <th>Name</th>
+    <th>Company</th>
+    <th>Phone</th>
+    <th>Email (login username)</th>
+    <th>Action</th>
+  </tr>
+</thead>
+<tbody>
+  {companySupervisors.length === 0 ? (
+    <tr>
+      <td colSpan="5" style={{ textAlign: 'center' }}>
+        No company supervisor accounts yet. Add one below.
+      </td>
+    </tr>
+  ) : (
+    companySupervisors.map((cs) => (
+      <tr key={cs.id}>
+        <td>{cs.name}</td>
+        <td>{cs.company_name}</td>
+        <td>{cs.phone}</td>
+        <td>{cs.email}</td>
+        <td>
+          <button
+            className="btn btn-danger"
+            style={{ padding: '8px 16px', fontSize: '12px' }}
+            disabled={deletingId === `company-${cs.id}`}
+            onClick={() => handleDeleteAccount('company', cs.id, cs.name)}
+          >
+            {deletingId === `company-${cs.id}` ? 'Deleting...' : 'Delete'}
+          </button>
+        </td>
+      </tr>
+    ))
+  )}
+</tbody>
         </table>
 
         <div style={{ marginTop: '24px' }}>

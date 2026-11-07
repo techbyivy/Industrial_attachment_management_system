@@ -20,6 +20,7 @@ from validation import (
     validate_score_int,
     validate_student_register,
 )
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder=None)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'iams-change-me')
@@ -376,9 +377,11 @@ def get_logbook(registration_number):
 # Reports Upload / Retrieval
 # ─────────────────────────────────────────────
 
+ALLOWED_REPORT_EXTENSIONS = {'.doc', '.docx'}
+
 @app.route('/api/student/report', methods=['POST'])
 def save_report():
-    """Save a student report file."""
+    """Save a student report file (Word documents only)."""
     cursor = None
     try:
         if 'file' not in request.files:
@@ -389,20 +392,34 @@ def save_report():
 
         if not index_number:
             return jsonify({'success': False, 'message': 'Missing indexNumber'}), 400
-
         if file.filename == '':
             return jsonify({'success': False, 'message': 'No file selected'}), 400
+
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in ALLOWED_REPORT_EXTENSIONS:
+            return jsonify({'success': False, 'message': 'Only Microsoft Word files (.doc, .docx) are allowed'}), 400
 
         upload_folder = os.getenv('UPLOAD_FOLDER', 'uploads/reports')
         os.makedirs(upload_folder, exist_ok=True)
 
-        # Registration numbers may contain '/' which would be interpreted as folders.
+        # Registration numbers contain '/', so replace it, then sanitize the whole name.
         safe_index_number = str(index_number).replace('/', '_')
-        filename = f"{safe_index_number}_{file.filename}"
+        filename = secure_filename(f"{safe_index_number}_{file.filename}")
         filepath = os.path.join(upload_folder, filename)
-        file.save(filepath)
 
         cursor = get_cursor()
+
+        # Remember the previous file (if any) so we can delete it after replacing.
+        cursor.execute(
+            """SELECT r.filepath FROM reports r
+               JOIN students s ON s.id = r.student_id
+               WHERE s.registration_number = %s""",
+            (index_number,)
+        )
+        old = cursor.fetchone()
+
+        file.save(filepath)
+
         cursor.execute(
             """INSERT INTO reports (student_id, filename, filepath)
                VALUES (
@@ -410,36 +427,22 @@ def save_report():
                  %s, %s
                )
                ON DUPLICATE KEY UPDATE
-                 filename = VALUES(filename),
-                 filepath = VALUES(filepath)""",
+                 filename    = VALUES(filename),
+                 filepath    = VALUES(filepath),
+                 uploaded_at = CURRENT_TIMESTAMP""",
             (index_number, filename, filepath)
         )
-
         mysql.connection.commit()
+
+        if old and old['filepath'] and old['filepath'] != filepath and os.path.isfile(old['filepath']):
+            try:
+                os.remove(old['filepath'])
+            except OSError:
+                pass
+
         return jsonify({'success': True, 'message': 'Report uploaded successfully'})
     except Exception as e:
         mysql.connection.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-    finally:
-        if cursor:
-            cursor.close()
-
-
-@app.route('/api/student/reports/<registration_number>', methods=['GET'])
-def get_reports(registration_number):
-    cursor = None
-    try:
-        cursor = get_cursor()
-        cursor.execute(
-            """SELECT r.* FROM reports r
-               JOIN students s ON s.id = r.student_id
-               WHERE s.registration_number = %s
-               ORDER BY r.uploaded_at DESC""",
-            (registration_number,)
-        )
-        reports = cursor.fetchall()
-        return jsonify({'success': True, 'reports': reports})
-    except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
         if cursor:
@@ -483,6 +486,61 @@ def get_visiting_supervisor_reports():
         if cursor:
             cursor.close()
 
+@app.route('/api/supervisor/visiting/report-lookup', methods=['GET'])
+def lookup_student_report():
+    """
+    Visiting supervisor searches a registration number.
+    Query params: supervisorId, registrationNumber
+    404 if the student isn't assigned to this supervisor.
+    'report' is null if the student hasn't uploaded yet.
+    """
+    supervisor_id = request.args.get('supervisorId')
+    reg_no = (request.args.get('registrationNumber') or '').strip()
+    if not supervisor_id or not reg_no:
+        return jsonify({'success': False, 'message': 'Missing supervisorId or registrationNumber'}), 400
+
+    cursor = None
+    try:
+        cursor = get_cursor()
+        cursor.execute(
+            """SELECT s.id AS student_id, s.registration_number, s.first_name, s.last_name,
+                      r.id AS report_id, r.filename, r.uploaded_at,
+                      vg.total_score, vg.remarks
+               FROM students s
+               JOIN student_assignments sa ON sa.student_id = s.id
+               LEFT JOIN reports r ON r.student_id = s.id
+               LEFT JOIN visiting_grades vg ON vg.student_id = s.id
+               WHERE sa.supervisor_id = %s
+                 AND UPPER(s.registration_number) = UPPER(%s)""",
+            (supervisor_id, reg_no)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'success': False,
+                            'message': 'Student not found under your supervision'}), 404
+
+        report = None
+        if row['report_id']:
+            report = {
+                'id': row['report_id'],
+                'filename': row['filename'],
+                'uploaded_at': row['uploaded_at'].isoformat() if row['uploaded_at'] else None,
+            }
+        return jsonify({
+            'success': True,
+            'student': {
+                'registration_number': row['registration_number'],
+                'name': f"{row['first_name']} {row['last_name']}",
+            },
+            'report': report,
+            'grade': {'total_score': row['total_score'], 'remarks': row['remarks']}
+                     if row['total_score'] is not None else None,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
 
 # ─────────────────────────────────────────────
 # NEW: Serve an uploaded report file (view/download)
@@ -590,11 +648,26 @@ def save_visiting_grade():
         if not index_number:
             return jsonify({'success': False, 'message': 'Missing indexNumber'}), 400
 
+        supervisor_id = data.get('supervisorId')
+        if not supervisor_id:
+            return jsonify({'success': False, 'message': 'Missing supervisorId'}), 400
+
         err, total_score = validate_score_int(data.get('totalScore'), 'University total score', 0, 80)
         if err:
             return jsonify({'success': False, 'message': err}), 400
 
         cursor = get_cursor()
+
+        # Ownership check: this supervisor must be assigned to this student.
+        cursor.execute(
+            """SELECT 1 FROM student_assignments sa
+               JOIN students s ON s.id = sa.student_id
+               WHERE s.registration_number = %s AND sa.supervisor_id = %s""",
+            (index_number, supervisor_id)
+        )
+        if not cursor.fetchone():
+            return jsonify({'success': False, 'message': 'Not your assigned student'}), 403
+
         cursor.execute(
             """INSERT INTO visiting_grades (
                  student_id, grades, total_score, remarks
@@ -623,8 +696,7 @@ def save_visiting_grade():
     finally:
         if cursor:
             cursor.close()
-
-
+            
 @app.route('/api/grades/company', methods=['POST'])
 def save_company_grades():
     """Company supervisor submits grades for a student."""
@@ -868,22 +940,6 @@ def update_lecturer(lecturer_id):
             cursor.close()
 
 
-@app.route('/api/admin/lecturer/<int:lecturer_id>', methods=['DELETE'])
-def delete_lecturer(lecturer_id):
-    cursor = None
-    try:
-        cursor = get_cursor()
-        cursor.execute("DELETE FROM visiting_supervisors WHERE id = %s", (lecturer_id,))
-        mysql.connection.commit()
-        return jsonify({'success': True, 'message': 'Lecturer deleted successfully'})
-    except Exception as e:
-        mysql.connection.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-    finally:
-        if cursor:
-            cursor.close()
-
-
 @app.route('/api/admin/company-supervisors', methods=['GET'])
 def get_company_supervisors():
     """List company supervisor accounts (no passwords)."""
@@ -932,6 +988,53 @@ def add_company_supervisor():
         if cursor:
             cursor.close()
 
+@app.route('/api/admin/lecturers/<int:lecturer_id>', methods=['DELETE'])
+def delete_lecturer(lecturer_id):
+    cursor = None
+    try:
+        cursor = get_cursor()
+        # Remove their student assignments first (table/column names are a guess, see note below)
+        cursor.execute(
+            "DELETE FROM student_assignments WHERE supervisor_id = %s",
+            (lecturer_id,)
+        )
+        cursor.execute(
+            "DELETE FROM visiting_supervisors WHERE id = %s",
+            (lecturer_id,)
+        )
+        if cursor.rowcount == 0:
+            mysql.connection.rollback()
+            return jsonify({'success': False, 'message': 'Lecturer not found'}), 404
+        mysql.connection.commit()
+        return jsonify({'success': True, 'message': 'Lecturer deleted successfully'}), 200
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 400
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@app.route('/api/admin/company-supervisors/<int:supervisor_id>', methods=['DELETE'])
+def delete_company_supervisor(supervisor_id):
+    cursor = None
+    try:
+        cursor = get_cursor()
+        cursor.execute(
+            "DELETE FROM company_supervisors WHERE id = %s",
+            (supervisor_id,)
+        )
+        if cursor.rowcount == 0:
+            mysql.connection.rollback()
+            return jsonify({'success': False, 'message': 'Company supervisor not found'}), 404
+        mysql.connection.commit()
+        return jsonify({'success': True, 'message': 'Company supervisor deleted successfully'}), 200
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 400
+    finally:
+        if cursor:
+            cursor.close()
 
 @app.route('/api/admin/assign-university-supervisors', methods=['POST'])
 def assign_university_supervisors():

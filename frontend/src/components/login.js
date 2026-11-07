@@ -36,8 +36,8 @@ const Login = ({ onLogin }) => {
         });
         const data = await parseJson(res);
         if (!data.success) throw new Error(data.message || 'Invalid admin credentials');
-        if (keepSignedIn) localStorage.setItem('user', JSON.stringify({ username: 'admin', role: 'admin' }));
-        onLogin({ username: 'admin' }, 'admin');
+                if (keepSignedIn) localStorage.setItem('user', JSON.stringify({ id: data.user.id, username: 'admin', role: 'admin' }));
+        onLogin({ id: data.user.id, username: 'admin' }, 'admin');
         return;
       }
 
@@ -48,8 +48,8 @@ const Login = ({ onLogin }) => {
       });
       const data = await parseJson(res);
       if (!data.success) throw new Error(data.message || 'Invalid credentials');
-      if (keepSignedIn) localStorage.setItem('user', JSON.stringify({ username: loginUsername, role: data.user.role }));
-      onLogin({ username: loginUsername }, data.user.role);
+            if (keepSignedIn) localStorage.setItem('user', JSON.stringify({ id: data.user.id, username: loginUsername, role: data.user.role }));
+      onLogin({ id: data.user.id, username: loginUsername }, data.user.role);
     } catch (err) {
       setNotice({ type: 'error', message: err.message || 'Connection error' });
     } finally {
@@ -297,6 +297,7 @@ const Login = ({ onLogin }) => {
                 <option value="SET">SET</option>
                 <option value="SHTM">SHTM</option>
                 <option value="SHS">SHS</option>
+                <option value="SOE">SOE</option>
               </select>
             </div>
             <div className="form-group">

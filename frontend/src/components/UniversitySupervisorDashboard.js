@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import AIFAQChatbot from './common/AIFAQChatbot';
 import StatusNotice from './common/StatusNotice';
 
@@ -13,6 +13,42 @@ const UniversitySupervisorDashboard = ({ user, onLogout }) => {
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
 
+  const [lookup, setLookup] = useState(null);
+  const [reportMsg, setReportMsg] = useState('');
+
+    useEffect(() => {
+    const reg = indexNumber.trim();
+    if (!reg) { setLookup(null); setReportMsg(''); return; }
+
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/supervisor/visiting/report-lookup?supervisorId=${user.id}&registrationNumber=${encodeURIComponent(reg)}`
+        );
+        const data = await res.json();
+        if (!res.ok) { setLookup(null); setReportMsg(data.message || 'Student not found'); return; }
+        setLookup(data);
+        setReportMsg(data.report ? '' : 'This student has not uploaded a report yet.');
+      } catch {
+        setLookup(null);
+        setReportMsg('Could not load report.');
+      }
+    }, 400);
+
+    return () => clearTimeout(t);
+  }, [indexNumber, user.id]);
+
+  const downloadReport = async () => {
+    const res = await fetch(`${API_BASE}/api/reports/download/${lookup.report.id}?supervisorId=${user.id}`);
+    if (!res.ok) { setNotice({ type: 'error', message: 'Could not download the report.' }); return; }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = lookup.report.filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  
   const handleGradeChange = (key, value) => {
     setGrades(prev => ({ ...prev, [key]: Number(value) }));
   };
@@ -35,6 +71,7 @@ const UniversitySupervisorDashboard = ({ user, onLogout }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           indexNumber,
+          supervisorId: user.id,
           grades,
           totalScore: scaledScore, // submitted as a value out of 80
           remarks: '',
@@ -97,6 +134,25 @@ const UniversitySupervisorDashboard = ({ user, onLogout }) => {
                   value={indexNumber}
                   onChange={(e) => setIndexNumber(e.target.value)}
                 />
+                                {lookup && (
+                  <div style={{ marginTop: '8px' }}>
+                    <strong>{lookup.student.name}</strong>
+                    {lookup.report && (
+                      <>
+                        {' '}· report uploaded {new Date(lookup.report.uploaded_at).toLocaleString()}{' '}
+                        <button type="button" className="btn btn-secondary" onClick={downloadReport}>
+                          Download report
+                        </button>
+                      </>
+                    )}
+                    {lookup.grade && (
+                      <div style={{ color: '#666', fontSize: '0.9em' }}>
+                        Previously graded: {lookup.grade.total_score} / 80
+                      </div>
+                    )}
+                  </div>
+                )}
+                {reportMsg && <div style={{ marginTop: '8px', color: '#b00020' }}>{reportMsg}</div>}
               </div>
               <strong>DIRECTIONS:</strong> Please indicate by clicking the options below to indicate the degree to which the student best measures up to the competencies stated below
               <div style={{ marginTop: '10px' }}>
